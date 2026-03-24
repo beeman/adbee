@@ -1,10 +1,33 @@
 #!/usr/bin/env bun
 
-import { greet } from './index.ts'
+import { createApp } from './app.ts'
 
-function main() {
-  const name = process.argv[2] || 'World'
-  console.log(greet(name))
+interface PackageManifest {
+  description: string
+  version: string
 }
 
-main()
+function isPackageManifest(value: unknown): value is PackageManifest {
+  if (!value || typeof value !== 'object') {
+    return false
+  }
+
+  const manifest = value as Record<string, unknown>
+
+  return typeof manifest.description === 'string' && typeof manifest.version === 'string'
+}
+
+async function main() {
+  const packageManifest = await Bun.file(new URL('../package.json', import.meta.url)).json()
+
+  if (!isPackageManifest(packageManifest)) {
+    console.error('Invalid package.json: "description" and "version" fields are required and must be strings.')
+    process.exitCode = 1
+
+    return
+  }
+
+  await createApp(packageManifest).execute()
+}
+
+void main()

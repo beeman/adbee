@@ -5,7 +5,10 @@
   "bugs": {
     "url": "https://github.com/beeman/adbee/issues"
   },
-  "dependencies": {},
+  "dependencies": {
+    "@crustjs/core": "^0.0.15",
+    "@crustjs/plugins": "^0.0.20"
+  },
   "description": "Convenience CLI for Android Debug Bridge (adb).",
   "devDependencies": {
     "@biomejs/biome": "2.4.6",
@@ -54,6 +57,7 @@
     "changeset": "changeset",
     "check-types": "tsc -b --noEmit",
     "ci": "bun run build && bun run lint && bun run check-types && bun test",
+    "dev": "bun run src/cli.ts",
     "lint": "biome check --error-on-warnings",
     "lint:fix": "biome check --error-on-warnings --write",
     "release": "changeset publish",
