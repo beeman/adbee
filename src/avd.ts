@@ -1,0 +1,797 @@
+import { constants } from 'node:fs'
+import { access, readdir } from 'node:fs/promises'
+import { homedir } from 'node:os'
+import { basename, join } from 'node:path'
+
+const FORMAT_NAME_SEGMENT_OVERRIDES = {
+  api: 'API',
+  apis: 'APIs',
+  atd: 'ATD',
+  tv: 'TV',
+  xl: 'XL',
+} as const
+const AVAILABLE_AVD_DEVICE_DEFINITION_JAR_ENTRIES = [
+  'com/android/sdklib/devices/automotive.xml',
+  'com/android/sdklib/devices/desktop.xml',
+  'com/android/sdklib/devices/devices.xml',
+  'com/android/sdklib/devices/nexus.xml',
+  'com/android/sdklib/devices/tv.xml',
+  'com/android/sdklib/devices/wear.xml',
+  'com/android/sdklib/devices/xr.xml',
+] as const
+const TAG_DISPLAY_OVERRIDES = {
+  google_apis: 'Google APIs',
+  google_apis_playstore: 'Google Play',
+} as const
+
+export const DEFAULT_DATA_SIZE = '32G'
+export const DEFAULT_DEVICE = 'pixel_9_pro_xl'
+export const DEFAULT_RAM_MB = 8192
+export const DEFAULT_SDCARD_SIZE = '512M'
+export const DEFAULT_SYSTEM_IMAGE = 'system-images;android-36;google_apis_playstore;arm64-v8a'
+export const DEFAULT_VM_HEAP_MB = 576
+
+interface DirectoryEntry {
+  isDirectory(): boolean
+  name: string
+}
+
+export interface CreateAvdOptions {
+  dataSize?: string
+  device?: string
+  name?: string
+  ramMb?: number
+  sdkRoot?: string
+  sdcardSize?: string
+  systemImage?: string
+  vmHeapMb?: number
+}
+
+export interface CreateAvdResult {
+  avdName: string
+  created: boolean
+  emulatorPath: string
+  sdkRoot: string
+  systemImage: string
+}
+
+export interface AvailableAvdDevice {
+  device: string
+  name?: string
+  oem?: string
+  tag?: string
+}
+
+export interface AvailableAvdDeviceDetails extends AvailableAvdDevice {
+  apiLevel?: string
+  density?: string
+  diagonalLength?: string
+  playStore?: boolean
+  resolution?: string
+  screenRatio?: string
+}
+
+export interface InstalledAvd {
+  device?: string
+  name: string
+  readOnly?: boolean
+  target?: string
+}
+
+export interface RunCommandOptions {
+  stdin?: string
+}
+
+export type CommandRunner = (cmd: [string, ...string[]], options?: RunCommandOptions) => Promise<string>
+export type DirectoryReader = (directoryPath: string) => Promise<readonly DirectoryEntry[]>
+export type FileReader = (filePath: string) => Promise<string>
+export type FileWriter = (filePath: string, contents: string) => Promise<void>
+export type HomeDirectoryResolver = () => string
+export type PathChecker = (filePath: string) => Promise<boolean>
+
+export interface CreateAvdDependencies {
+  getHomeDirectory?: HomeDirectoryResolver
+  pathExists?: PathChecker
+  readDirectory?: DirectoryReader
+  readTextFile?: FileReader
+  runCommand?: CommandRunner
+  writeTextFile?: FileWriter
+}
+
+interface ResolvedCreateAvdOptions {
+  dataSize: string
+  device: string
+  name: string
+  ramMb: number
+  sdkRoot: string
+  sdcardSize: string
+  systemImage: string
+  vmHeapMb: number
+}
+
+interface ParsedSystemImagePackage {
+  abi: string
+  platform: string
+  tagId: string
+}
+
+function capitalize(value: string): string {
+  return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1).toLowerCase()}`
+}
+
+function createAvdConfigValues(options: ResolvedCreateAvdOptions): Record<string, string> {
+  const { abi, platform, tagId } = parseSystemImagePackage(options.systemImage)
+  const tagDisplay = getTagDisplay(tagId)
+
+  return {
+    'abi.type': abi,
+    'avd.ini.displayname': options.name.replaceAll('_', ' '),
+    'disk.dataPartition.size': options.dataSize,
+    'fastboot.forceChosenSnapshotBoot': 'no',
+    'fastboot.forceColdBoot': 'no',
+    'fastboot.forceFastBoot': 'yes',
+    'hw.audioInput': 'yes',
+    'hw.camera.back': 'virtualscene',
+    'hw.camera.front': 'emulated',
+    'hw.cpu.arch': getCpuArchitecture(abi),
+    'hw.cpu.ncore': '4',
+    'hw.gpu.enabled': 'yes',
+    'hw.gpu.mode': 'auto',
+    'hw.keyboard': 'yes',
+    'hw.ramSize': String(options.ramMb),
+    'hw.sdCard': 'yes',
+    'image.sysdir.1': `${systemImagePackageToRelativeDirectory(options.systemImage)}/`,
+    'PlayStore.enabled': String(tagId.includes('play')),
+    'runtime.network.latency': 'none',
+    'runtime.network.speed': 'full',
+    'sdcard.size': options.sdcardSize,
+    showDeviceFrame: 'yes',
+    'skin.dynamic': 'yes',
+    'tag.display': tagDisplay,
+    'tag.displaynames': tagDisplay,
+    'tag.id': tagId,
+    'tag.ids': tagId,
+    target: platform,
+    'userdata.useQcow2': 'no',
+    'vm.heapSize': String(options.vmHeapMb),
+  }
+}
+
+async function defaultReadDirectory(directoryPath: string): Promise<readonly DirectoryEntry[]> {
+  return readdir(directoryPath, { withFileTypes: true })
+}
+
+async function defaultReadTextFile(filePath: string): Promise<string> {
+  return Bun.file(filePath).text()
+}
+
+async function defaultWriteTextFile(filePath: string, contents: string): Promise<void> {
+  await Bun.write(filePath, contents)
+}
+
+function parseConfigValues(contents: string): Record<string, string> {
+  const values: Record<string, string> = {}
+
+  for (const line of contents
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean)) {
+    const separatorIndex = line.indexOf('=')
+
+    if (separatorIndex === -1) {
+      continue
+    }
+
+    const key = line.slice(0, separatorIndex)
+    const value = line.slice(separatorIndex + 1)
+
+    if (key) {
+      values[key] = value
+    }
+  }
+
+  return values
+}
+
+function extractXmlTagValue(contents: string, tagName: string): string | undefined {
+  const match = contents.match(new RegExp(`<d:${tagName}>([\\s\\S]*?)<\\/d:${tagName}>`))
+
+  if (!match?.[1]) {
+    return undefined
+  }
+
+  return match[1]
+    .replaceAll('&amp;', '&')
+    .replaceAll('&apos;', "'")
+    .replaceAll('&gt;', '>')
+    .replaceAll('&lt;', '<')
+    .replaceAll('&quot;', '"')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+function parseAvailableAvdDevices(contents: string): AvailableAvdDevice[] {
+  return contents
+    .split(/^---------\s*$/m)
+    .map((section) => section.trim())
+    .filter(Boolean)
+    .flatMap((section) => {
+      const deviceMatch = section.match(/^id:\s+\d+\s+or\s+"([^"]+)"$/m)
+
+      if (!deviceMatch?.[1]) {
+        return []
+      }
+
+      const nameMatch = section.match(/^\s*Name:\s*(.+)$/m)
+      const oemMatch = section.match(/^\s*OEM\s*:\s*(.+)$/m)
+      const tagMatch = section.match(/^\s*Tag\s*:\s*(.+)$/m)
+
+      return [
+        {
+          device: deviceMatch[1],
+          name: nameMatch?.[1],
+          oem: oemMatch?.[1],
+          tag: tagMatch?.[1],
+        },
+      ]
+    })
+    .sort((left, right) => left.device.localeCompare(right.device))
+}
+
+function parseAvailableAvdDeviceDetails(contents: string): AvailableAvdDeviceDetails[] {
+  return Array.from(contents.matchAll(/<d:device\b([^>]*)>([\s\S]*?)<\/d:device>/g))
+    .flatMap(([, _attributes = '', deviceContents = '']) => {
+      const name = extractXmlTagValue(deviceContents, 'name')
+
+      if (!name) {
+        return []
+      }
+
+      const device = extractXmlTagValue(deviceContents, 'id') ?? name
+      const xDimension = extractXmlTagValue(deviceContents, 'x-dimension')
+      const yDimension = extractXmlTagValue(deviceContents, 'y-dimension')
+
+      return [
+        {
+          apiLevel: extractXmlTagValue(deviceContents, 'api-level'),
+          density: extractXmlTagValue(deviceContents, 'pixel-density'),
+          device,
+          diagonalLength: extractXmlTagValue(deviceContents, 'diagonal-length'),
+          name,
+          oem: extractXmlTagValue(deviceContents, 'manufacturer'),
+          playStore: extractXmlTagValue(deviceContents, 'playstore-enabled') === 'true' ? true : undefined,
+          resolution: xDimension && yDimension ? `${xDimension}x${yDimension}` : undefined,
+          screenRatio: extractXmlTagValue(deviceContents, 'screen-ratio'),
+          tag: extractXmlTagValue(deviceContents, 'tag-id'),
+        },
+      ]
+    })
+    .sort((left, right) => left.device.localeCompare(right.device))
+}
+
+function parsePixelDeviceGeneration(device: string): number | undefined {
+  const match = device.match(/^pixel_(\d+)/)
+
+  if (!match?.[1]) {
+    return undefined
+  }
+
+  return Number.parseInt(match[1], 10)
+}
+
+function formatDeviceName(device: string): string {
+  return device
+    .split('_')
+    .filter(Boolean)
+    .map((segment) => formatNameSegment(segment))
+    .join('_')
+}
+
+function formatNameSegment(segment: string): string {
+  const lowered = segment.toLowerCase()
+  const override = FORMAT_NAME_SEGMENT_OVERRIDES[lowered as keyof typeof FORMAT_NAME_SEGMENT_OVERRIDES]
+
+  if (override) {
+    return override
+  }
+
+  const numericSuffixMatch = lowered.match(/^(\d+)([a-z]+)$/)
+
+  if (numericSuffixMatch) {
+    const [, numericPrefix, letterSuffix] = numericSuffixMatch
+
+    if (numericPrefix && letterSuffix) {
+      return `${numericPrefix}${letterSuffix.toUpperCase()}`
+    }
+  }
+
+  return capitalize(segment)
+}
+
+function formatTagName(tagId: string): string {
+  if (tagId === 'google_apis_playstore') {
+    return 'Play'
+  }
+
+  if (tagId === 'google_apis_playstore_ps16k') {
+    return 'Play_Ps16k'
+  }
+
+  return tagId
+    .split(/[_-]/)
+    .filter(Boolean)
+    .map((segment) => formatNameSegment(segment))
+    .join('_')
+}
+
+function getCpuArchitecture(abi: string): string {
+  if (abi.startsWith('arm64')) {
+    return 'arm64'
+  }
+
+  if (abi.startsWith('armeabi')) {
+    return 'arm'
+  }
+
+  return abi.split('-', 1)[0] ?? abi
+}
+
+function getDefaultPathExists(mode: number = constants.F_OK): PathChecker {
+  return async (filePath: string) => {
+    try {
+      await access(filePath, mode)
+
+      return true
+    } catch {
+      return false
+    }
+  }
+}
+
+function getTagDisplay(tagId: string): string {
+  const override = TAG_DISPLAY_OVERRIDES[tagId as keyof typeof TAG_DISPLAY_OVERRIDES]
+
+  if (override) {
+    return override
+  }
+
+  return tagId
+    .split(/[_-]/)
+    .filter(Boolean)
+    .map((segment) => {
+      const lowered = segment.toLowerCase()
+
+      if (lowered === 'api') {
+        return 'API'
+      }
+
+      if (lowered === 'apis') {
+        return 'APIs'
+      }
+
+      if (lowered === 'atd') {
+        return 'ATD'
+      }
+
+      if (lowered === 'playstore') {
+        return 'Play Store'
+      }
+
+      return capitalize(segment)
+    })
+    .join(' ')
+}
+
+function getToolPaths(sdkRoot: string) {
+  return {
+    avdmanager: join(sdkRoot, 'cmdline-tools', 'latest', 'bin', 'avdmanager'),
+    emulator: join(sdkRoot, 'emulator', 'emulator'),
+    sdkmanager: join(sdkRoot, 'cmdline-tools', 'latest', 'bin', 'sdkmanager'),
+  }
+}
+
+function getAvdDeviceDefinitionJarPaths(sdkRoot: string): string[] {
+  return [
+    join(sdkRoot, 'cmdline-tools', 'latest', 'lib', 'sdklib', 'sdklib.core.jar'),
+    join(sdkRoot, 'cmdline-tools', 'latest', 'lib', 'sdklib', 'tools.sdklib.jar'),
+  ]
+}
+
+function getAvdConfigPath(homeDirectory: string, avdName: string): string {
+  return join(homeDirectory, '.android', 'avd', `${avdName}.avd`, 'config.ini')
+}
+
+async function listDirectoryNames(directoryPath: string, readDirectory: DirectoryReader): Promise<string[]> {
+  try {
+    return (await readDirectory(directoryPath))
+      .filter((entry) => entry.isDirectory())
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right))
+  } catch {
+    return []
+  }
+}
+
+async function runCommand(cmd: [string, ...string[]], options: RunCommandOptions = {}): Promise<string> {
+  const process = Bun.spawn({
+    cmd,
+    stderr: 'pipe',
+    stdin: options.stdin === undefined ? 'ignore' : 'pipe',
+    stdout: 'pipe',
+  })
+
+  if (options.stdin !== undefined) {
+    const stdin = process.stdin
+
+    if (!stdin) {
+      throw new Error(`Failed to write to ${basename(cmd[0])} stdin.`)
+    }
+
+    stdin.write(options.stdin)
+    stdin.end()
+  }
+
+  const [stdout, stderr, exitCode] = await Promise.all([
+    new Response(process.stdout).text(),
+    new Response(process.stderr).text(),
+    process.exited,
+  ])
+
+  if (exitCode !== 0) {
+    throw new Error(stderr.trim() || stdout.trim() || `${basename(cmd[0])} exited with code ${exitCode}`)
+  }
+
+  return stdout
+}
+
+function resolveCreateAvdOptions(
+  options: CreateAvdOptions,
+  homeDirectoryResolver: HomeDirectoryResolver,
+): ResolvedCreateAvdOptions {
+  return {
+    dataSize: options.dataSize ?? DEFAULT_DATA_SIZE,
+    device: options.device ?? DEFAULT_DEVICE,
+    name:
+      options.name ??
+      deriveDefaultAvdName(options.device ?? DEFAULT_DEVICE, options.systemImage ?? DEFAULT_SYSTEM_IMAGE),
+    ramMb: options.ramMb ?? DEFAULT_RAM_MB,
+    sdcardSize: options.sdcardSize ?? DEFAULT_SDCARD_SIZE,
+    sdkRoot: options.sdkRoot ?? resolveAndroidSdkRoot(process.env, homeDirectoryResolver()),
+    systemImage: options.systemImage ?? DEFAULT_SYSTEM_IMAGE,
+    vmHeapMb: options.vmHeapMb ?? DEFAULT_VM_HEAP_MB,
+  }
+}
+
+export function buildAvdConfig(existingConfig: string, options: CreateAvdOptions): string {
+  const resolvedOptions = resolveCreateAvdOptions(options, homedir)
+  const mergedValues = parseConfigValues(existingConfig)
+
+  Object.assign(mergedValues, createAvdConfigValues(resolvedOptions))
+
+  return `${Object.keys(mergedValues)
+    .sort((left, right) => left.localeCompare(right))
+    .map((key) => `${key}=${mergedValues[key]}`)
+    .join('\n')}\n`
+}
+
+function serializeConfigValues(values: Record<string, string>): string {
+  return `${Object.keys(values)
+    .sort((left, right) => left.localeCompare(right))
+    .map((key) => `${key}=${values[key]}`)
+    .join('\n')}\n`
+}
+
+function formatRandomAvdNameSuffix(randomNumber: number): string {
+  return String(Math.abs(Math.trunc(randomNumber)) % 100000).padStart(5, '0')
+}
+
+export async function createOrUpdateAvd(
+  options: CreateAvdOptions = {},
+  dependencies: CreateAvdDependencies = {},
+): Promise<CreateAvdResult> {
+  const getHomeDirectory = dependencies.getHomeDirectory ?? homedir
+  const pathExists = dependencies.pathExists ?? getDefaultPathExists()
+  const readTextFile = dependencies.readTextFile ?? defaultReadTextFile
+  const runCommandDependency = dependencies.runCommand ?? runCommand
+  const writeTextFile = dependencies.writeTextFile ?? defaultWriteTextFile
+  const resolvedOptions = resolveCreateAvdOptions(options, getHomeDirectory)
+  const toolPaths = getToolPaths(resolvedOptions.sdkRoot)
+  const { abi } = parseSystemImagePackage(resolvedOptions.systemImage)
+  const systemImageDirectory = systemImagePackageToDirectory(resolvedOptions.sdkRoot, resolvedOptions.systemImage)
+
+  if (!(await pathExists(systemImageDirectory))) {
+    await runCommandDependency([toolPaths.sdkmanager, '--install', resolvedOptions.systemImage])
+  }
+
+  if (!(await pathExists(systemImageDirectory))) {
+    throw new Error(`System image is not installed: ${resolvedOptions.systemImage}`)
+  }
+
+  const avdDirectory = join(getHomeDirectory(), '.android', 'avd', `${resolvedOptions.name}.avd`)
+  const avdConfigPath = join(avdDirectory, 'config.ini')
+  let created = false
+
+  if (!(await pathExists(avdDirectory))) {
+    await runCommandDependency(
+      [
+        toolPaths.avdmanager,
+        'create',
+        'avd',
+        '--abi',
+        abi,
+        '--device',
+        resolvedOptions.device,
+        '--force',
+        '--name',
+        resolvedOptions.name,
+        '--package',
+        resolvedOptions.systemImage,
+        '--sdcard',
+        resolvedOptions.sdcardSize,
+      ],
+      { stdin: 'no\n' },
+    )
+    created = true
+  }
+
+  if (!(await pathExists(avdDirectory))) {
+    throw new Error(`AVD directory does not exist: ${avdDirectory}`)
+  }
+
+  const existingConfig = (await pathExists(avdConfigPath)) ? await readTextFile(avdConfigPath) : ''
+
+  await writeTextFile(avdConfigPath, buildAvdConfig(existingConfig, resolvedOptions))
+
+  return {
+    avdName: resolvedOptions.name,
+    created,
+    emulatorPath: toolPaths.emulator,
+    sdkRoot: resolvedOptions.sdkRoot,
+    systemImage: resolvedOptions.systemImage,
+  }
+}
+
+export async function deleteInstalledAvds(
+  avdNames: readonly string[],
+  sdkRoot: string = resolveAndroidSdkRoot(),
+  runDeleteCommand: CommandRunner = runCommand,
+): Promise<void> {
+  const { avdmanager } = getToolPaths(sdkRoot)
+  const results = await Promise.allSettled(
+    avdNames.map((avdName) => runDeleteCommand([avdmanager, 'delete', 'avd', '--name', avdName])),
+  )
+  const failures = results.flatMap((result, index) => {
+    if (result.status === 'fulfilled') {
+      return []
+    }
+
+    const message = result.reason instanceof Error ? result.reason.message : String(result.reason)
+
+    return [`Failed to delete "${avdNames[index]}": ${message}`]
+  })
+
+  if (failures.length === 1) {
+    throw new Error(failures[0] as string)
+  }
+
+  if (failures.length > 1) {
+    throw new Error(`Some AVDs could not be deleted:\n- ${failures.join('\n- ')}`)
+  }
+}
+
+export function deriveDefaultAvdName(
+  device: string = DEFAULT_DEVICE,
+  systemImage: string = DEFAULT_SYSTEM_IMAGE,
+): string {
+  const { platform, tagId } = parseSystemImagePackage(systemImage)
+  const apiLevel = platform.startsWith('android-') ? platform.slice('android-'.length) : platform
+
+  return [formatDeviceName(device), formatTagName(tagId), apiLevel].filter(Boolean).join('_')
+}
+
+export function resolveAvailableAvdName(
+  name: string,
+  existingAvdNames: readonly string[],
+  randomNumberFactory: () => number = () => Math.floor(Math.random() * 100000),
+): string {
+  if (!existingAvdNames.includes(name)) {
+    return name
+  }
+
+  const existingNameSet = new Set(existingAvdNames)
+  let candidateName = name
+
+  do {
+    candidateName = `${name}_${formatRandomAvdNameSuffix(randomNumberFactory())}`
+  } while (existingNameSet.has(candidateName))
+
+  return candidateName
+}
+
+export async function listInstalledAvds(
+  homeDirectory: string = homedir(),
+  readDirectory: DirectoryReader = defaultReadDirectory,
+  readTextFile: FileReader = defaultReadTextFile,
+): Promise<InstalledAvd[]> {
+  const avdRootDirectory = join(homeDirectory, '.android', 'avd')
+  const avdDirectoryNames = (await listDirectoryNames(avdRootDirectory, readDirectory)).filter((name) =>
+    name.endsWith('.avd'),
+  )
+
+  return Promise.all(
+    avdDirectoryNames.map(async (directoryName) => {
+      const configPath = join(avdRootDirectory, directoryName, 'config.ini')
+      const name = directoryName.slice(0, -'.avd'.length)
+      let configValues: Record<string, string> = {}
+
+      try {
+        configValues = parseConfigValues(await readTextFile(configPath))
+      } catch {
+        configValues = {}
+      }
+
+      return {
+        device: configValues['hw.device.name'],
+        name,
+        readOnly: configValues['adbee.readOnly'] === '1' ? true : undefined,
+        target: configValues.target,
+      }
+    }),
+  )
+}
+
+export async function getAvailableAvdDeviceDetails(
+  device: string,
+  sdkRoot: string,
+  dependencies: CreateAvdDependencies = {},
+): Promise<AvailableAvdDeviceDetails | undefined> {
+  const pathExists = dependencies.pathExists ?? getDefaultPathExists()
+  const runCommandDependency = dependencies.runCommand ?? runCommand
+  const jarPath = (
+    await Promise.all(
+      getAvdDeviceDefinitionJarPaths(sdkRoot).map(async (candidatePath) =>
+        (await pathExists(candidatePath)) ? candidatePath : undefined,
+      ),
+    )
+  ).find(Boolean)
+
+  if (!jarPath) {
+    throw new Error(`AVD device definition jar does not exist under ${sdkRoot}`)
+  }
+
+  for (const entryPath of AVAILABLE_AVD_DEVICE_DEFINITION_JAR_ENTRIES) {
+    const details = parseAvailableAvdDeviceDetails(
+      await runCommandDependency(['unzip', '-p', jarPath, entryPath]),
+    ).find(({ device: availableDevice }) => availableDevice === device)
+
+    if (details) {
+      return details
+    }
+  }
+
+  return undefined
+}
+
+export function filterLatestPixelAvdDevices(devices: readonly AvailableAvdDevice[]): AvailableAvdDevice[] {
+  const latestPixelGeneration = devices.reduce<number | undefined>((latestGeneration, { device }) => {
+    const generation = parsePixelDeviceGeneration(device)
+
+    if (generation === undefined) {
+      return latestGeneration
+    }
+
+    return latestGeneration === undefined ? generation : Math.max(latestGeneration, generation)
+  }, undefined)
+
+  if (latestPixelGeneration === undefined) {
+    return [...devices].sort((left, right) => left.device.localeCompare(right.device))
+  }
+
+  return devices
+    .filter(({ device }) => parsePixelDeviceGeneration(device) === latestPixelGeneration)
+    .sort((left, right) => left.device.localeCompare(right.device))
+}
+
+export async function listAvailableAvdDevices(
+  sdkRoot: string,
+  runListCommand: CommandRunner = runCommand,
+): Promise<AvailableAvdDevice[]> {
+  const { avdmanager } = getToolPaths(sdkRoot)
+
+  return parseAvailableAvdDevices(await runListCommand([avdmanager, 'list', 'device']))
+}
+
+export async function listInstalledPlatforms(
+  sdkRoot: string,
+  readDirectory: DirectoryReader = defaultReadDirectory,
+): Promise<string[]> {
+  return listDirectoryNames(join(sdkRoot, 'platforms'), readDirectory)
+}
+
+export async function startAvd(emulatorPath: string, avdName: string): Promise<void> {
+  const process = Bun.spawn({
+    cmd: [emulatorPath, `@${avdName}`],
+    detached: true,
+    stderr: 'ignore',
+    stdin: 'ignore',
+    stdout: 'ignore',
+  })
+
+  process.unref()
+}
+
+export async function setAvdProperties(
+  avdName: string,
+  properties: Record<string, string>,
+  dependencies: CreateAvdDependencies = {},
+): Promise<void> {
+  const getHomeDirectory = dependencies.getHomeDirectory ?? homedir
+  const pathExists = dependencies.pathExists ?? getDefaultPathExists()
+  const readTextFile = dependencies.readTextFile ?? defaultReadTextFile
+  const writeTextFile = dependencies.writeTextFile ?? defaultWriteTextFile
+  const configPath = getAvdConfigPath(getHomeDirectory(), avdName)
+
+  if (!(await pathExists(configPath))) {
+    throw new Error(`AVD config does not exist: ${configPath}`)
+  }
+
+  const configValues = parseConfigValues(await readTextFile(configPath))
+
+  Object.assign(configValues, properties)
+
+  await writeTextFile(configPath, serializeConfigValues(configValues))
+}
+
+export async function listInstalledSystemImages(
+  sdkRoot: string,
+  readDirectory: DirectoryReader = defaultReadDirectory,
+): Promise<string[]> {
+  const systemImagesDirectory = join(sdkRoot, 'system-images')
+  const packages: string[] = []
+  const platforms = await listDirectoryNames(systemImagesDirectory, readDirectory)
+
+  for (const platform of platforms) {
+    const platformDirectory = join(systemImagesDirectory, platform)
+    const tags = await listDirectoryNames(platformDirectory, readDirectory)
+
+    for (const tag of tags) {
+      const tagDirectory = join(platformDirectory, tag)
+      const abis = await listDirectoryNames(tagDirectory, readDirectory)
+
+      for (const abi of abis) {
+        packages.push(['system-images', platform, tag, abi].join(';'))
+      }
+    }
+  }
+
+  return packages.sort((left, right) => left.localeCompare(right))
+}
+
+export function parseSystemImagePackage(systemImage: string): ParsedSystemImagePackage {
+  const [category, platform, tagId, abi] = systemImage.split(';')
+
+  if (category !== 'system-images' || !platform || !tagId || !abi) {
+    throw new Error(`Invalid system image package: ${systemImage}`)
+  }
+
+  return {
+    abi,
+    platform,
+    tagId,
+  }
+}
+
+export function resolveAndroidSdkRoot(
+  environment: NodeJS.ProcessEnv = process.env,
+  homeDirectory: string = homedir(),
+): string {
+  return environment.ANDROID_SDK_ROOT ?? environment.ANDROID_HOME ?? join(homeDirectory, 'Library', 'Android', 'sdk')
+}
+
+export function systemImagePackageToDirectory(sdkRoot: string, systemImage: string): string {
+  return join(sdkRoot, ...systemImage.split(';'))
+}
+
+export function systemImagePackageToRelativeDirectory(systemImage: string): string {
+  return systemImage.split(';').join('/')
+}
