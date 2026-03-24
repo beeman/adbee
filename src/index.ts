@@ -21,6 +21,8 @@ export interface ListInstalledAppsOptions {
   labels?: boolean
 }
 
+type CommandRunner = typeof runCommand
+
 function compareApps(left: InstalledApp, right: InstalledApp): number {
   return left.packageName.localeCompare(right.packageName)
 }
@@ -108,6 +110,32 @@ async function runCommand(cmd: [string, ...string[]]): Promise<string> {
   }
 
   return stdout
+}
+
+export async function deleteInstalledApps(
+  packageNames: readonly string[],
+  runDeleteCommand: CommandRunner = runCommand,
+): Promise<void> {
+  const results = await Promise.allSettled(
+    packageNames.map((packageName) => runDeleteCommand(['adb', 'uninstall', packageName])),
+  )
+  const failures = results.flatMap((result, index) => {
+    if (result.status === 'fulfilled') {
+      return []
+    }
+
+    const message = result.reason instanceof Error ? result.reason.message : String(result.reason)
+
+    return [`Failed to uninstall "${packageNames[index]}": ${message}`]
+  })
+
+  if (failures.length === 1) {
+    throw new Error(failures[0] as string)
+  }
+
+  if (failures.length > 1) {
+    throw new Error(`Some apps could not be uninstalled:\n- ${failures.join('\n- ')}`)
+  }
 }
 
 async function resolveAppLabel(aaptCommand: string | null, packageName: string, packagePath: string): Promise<string> {

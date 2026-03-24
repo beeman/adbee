@@ -7,7 +7,8 @@
   },
   "dependencies": {
     "@crustjs/core": "^0.0.15",
-    "@crustjs/plugins": "^0.0.20"
+    "@crustjs/plugins": "^0.0.20",
+    "@crustjs/prompts": "^0.0.10"
   },
   "description": "Convenience CLI for Android Debug Bridge (adb).",
   "devDependencies": {
