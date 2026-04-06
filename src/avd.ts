@@ -549,6 +549,16 @@ async function listDirectoryNames(directoryPath: string, readDirectory: Director
   }
 }
 
+async function listEntryNames(directoryPath: string, readDirectory: DirectoryReader): Promise<string[]> {
+  try {
+    return (await readDirectory(directoryPath))
+      .map((entry) => entry.name)
+      .sort((left, right) => left.localeCompare(right))
+  } catch {
+    return []
+  }
+}
+
 async function runCommand(cmd: [string, ...string[]], options: RunCommandOptions = {}): Promise<string> {
   const process = Bun.spawn({
     cmd,
@@ -774,8 +784,12 @@ export async function listInstalledAvds(
   readTextFile: FileReader = defaultReadTextFile,
 ): Promise<InstalledAvd[]> {
   const avdRootDirectory = join(homeDirectory, '.android', 'avd')
-  const avdDirectoryNames = (await listDirectoryNames(avdRootDirectory, readDirectory)).filter((name) =>
-    name.endsWith('.avd'),
+  const avdEntryNames = await listEntryNames(avdRootDirectory, readDirectory)
+  const registeredAvdNames = new Set(
+    avdEntryNames.filter((name) => name.endsWith('.ini')).map((name) => name.slice(0, -'.ini'.length)),
+  )
+  const avdDirectoryNames = avdEntryNames.filter(
+    (name) => name.endsWith('.avd') && registeredAvdNames.has(name.slice(0, -'.avd'.length)),
   )
 
   return Promise.all(

@@ -167,6 +167,7 @@ test('listInstalledAvds discovers installed AVDs and sorts them alphabetically',
   try {
     await mkdir(join(homeDirectory, '.android', 'avd', 'Zed.avd'), { recursive: true })
     await mkdir(join(homeDirectory, '.android', 'avd', 'Alpha.avd'), { recursive: true })
+    await mkdir(join(homeDirectory, '.android', 'avd', 'Ghost.avd'), { recursive: true })
     await Bun.write(
       join(homeDirectory, '.android', 'avd', 'Zed.avd', 'config.ini'),
       'hw.device.name=pixel_9_pro_xl\ntarget=android-36\n',
@@ -175,6 +176,8 @@ test('listInstalledAvds discovers installed AVDs and sorts them alphabetically',
       join(homeDirectory, '.android', 'avd', 'Alpha.avd', 'config.ini'),
       'adbee.readOnly=1\nhw.device.name=pixel_8_pro\ntarget=android-35\n',
     )
+    await Bun.write(join(homeDirectory, '.android', 'avd', 'Zed.ini'), 'path=avd/Zed.avd\n')
+    await Bun.write(join(homeDirectory, '.android', 'avd', 'Alpha.ini'), 'path=avd/Alpha.avd\n')
 
     expect(await listInstalledAvds(homeDirectory)).toEqual([
       {
