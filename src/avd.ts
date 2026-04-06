@@ -78,6 +78,11 @@ export interface InstalledAvd {
   target?: string
 }
 
+export interface RunningAvd {
+  name: string
+  serial: string
+}
+
 export interface RunCommandOptions {
   stdin?: string
 }
@@ -559,6 +564,10 @@ async function listEntryNames(directoryPath: string, readDirectory: DirectoryRea
   }
 }
 
+async function isInstalledSystemImageDirectory(directoryPath: string, pathExists: PathChecker): Promise<boolean> {
+  return pathExists(join(directoryPath, 'source.properties'))
+}
+
 async function runCommand(cmd: [string, ...string[]], options: RunCommandOptions = {}): Promise<string> {
   const process = Bun.spawn({
     cmd,
@@ -655,11 +664,11 @@ export async function createOrUpdateAvd(
   const systemImageDirectory = systemImagePackageToDirectory(resolvedOptions.sdkRoot, resolvedOptions.systemImage)
   let configOverrides: BuildAvdConfigOverrides = {}
 
-  if (!(await pathExists(systemImageDirectory))) {
+  if (!(await isInstalledSystemImageDirectory(systemImageDirectory, pathExists))) {
     await runCommandDependency([toolPaths.sdkmanager, '--install', resolvedOptions.systemImage])
   }
 
-  if (!(await pathExists(systemImageDirectory))) {
+  if (!(await isInstalledSystemImageDirectory(systemImageDirectory, pathExists))) {
     throw new Error(`System image is not installed: ${resolvedOptions.systemImage}`)
   }
 
@@ -814,6 +823,34 @@ export async function listInstalledAvds(
   )
 }
 
+function parseRunningAvdName(contents: string): string | undefined {
+  return contents
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .find((value) => value.length > 0 && value !== 'OK')
+}
+
+function parseRunningAvdSerials(contents: string): string[] {
+  return contents
+    .split(/\r?\n/)
+    .map((value) => value.trim())
+    .filter(Boolean)
+    .flatMap((line) => {
+      if (line.startsWith('List of devices attached')) {
+        return []
+      }
+
+      const [serial, state] = line.split(/\s+/, 3)
+
+      if (!serial?.startsWith('emulator-') || state !== 'device') {
+        return []
+      }
+
+      return [serial]
+    })
+    .sort((left, right) => left.localeCompare(right))
+}
+
 export async function getAvailableAvdDeviceDetails(
   device: string,
   sdkRoot: string,
@@ -919,6 +956,24 @@ export async function listInstalledPlatforms(
   return listDirectoryNames(join(sdkRoot, 'platforms'), readDirectory)
 }
 
+export async function listRunningAvds(runAdbCommand: CommandRunner = runCommand): Promise<RunningAvd[]> {
+  const serials = parseRunningAvdSerials(await runAdbCommand(['adb', 'devices']))
+  const runningAvds = await Promise.all(
+    serials.map(async (serial) => ({
+      name: parseRunningAvdName(await runAdbCommand(['adb', '-s', serial, 'emu', 'avd', 'name'])) ?? serial,
+      serial,
+    })),
+  )
+
+  return runningAvds.sort(
+    (left, right) => left.name.localeCompare(right.name) || left.serial.localeCompare(right.serial),
+  )
+}
+
+export function resolveEmulatorPath(sdkRoot: string = resolveAndroidSdkRoot()): string {
+  return getToolPaths(sdkRoot).emulator
+}
+
 export async function startAvd(emulatorPath: string, avdName: string): Promise<void> {
   const process = Bun.spawn({
     cmd: [emulatorPath, `@${avdName}`],
@@ -929,6 +984,10 @@ export async function startAvd(emulatorPath: string, avdName: string): Promise<v
   })
 
   process.unref()
+}
+
+export async function stopRunningAvd(serial: string, runAdbCommand: CommandRunner = runCommand): Promise<void> {
+  await runAdbCommand(['adb', '-s', serial, 'emu', 'kill'])
 }
 
 export async function setAvdProperties(
@@ -956,6 +1015,7 @@ export async function setAvdProperties(
 export async function listInstalledSystemImages(
   sdkRoot: string,
   readDirectory: DirectoryReader = defaultReadDirectory,
+  pathExists: PathChecker = getDefaultPathExists(),
 ): Promise<string[]> {
   const systemImagesDirectory = join(sdkRoot, 'system-images')
   const packages: string[] = []
@@ -970,7 +1030,9 @@ export async function listInstalledSystemImages(
       const abis = await listDirectoryNames(tagDirectory, readDirectory)
 
       for (const abi of abis) {
-        packages.push(['system-images', platform, tag, abi].join(';'))
+        if (await isInstalledSystemImageDirectory(join(tagDirectory, abi), pathExists)) {
+          packages.push(['system-images', platform, tag, abi].join(';'))
+        }
       }
     }
   }

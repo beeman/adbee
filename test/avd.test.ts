@@ -33,6 +33,7 @@ import {
   listInstalledPlatforms,
   listInstalledSystemImages,
   listKnownAvdDevices,
+  listRunningAvds,
   resolveAndroidSdkRoot,
   resolveAvailableAvdName,
   setAvdProperties,
@@ -131,12 +132,26 @@ test('listInstalledSystemImages discovers installed packages and sorts them alph
   const rootDirectory = await createTemporaryDirectory('adbee-avd-images-')
 
   try {
+    await mkdir(
+      join(rootDirectory, 'system-images', 'android-CANARY', 'google_apis_playstore', 'arm64-v8a', '.installer'),
+      {
+        recursive: true,
+      },
+    )
     await mkdir(join(rootDirectory, 'system-images', 'android-36', 'google_apis_playstore', 'arm64-v8a'), {
       recursive: true,
     })
     await mkdir(join(rootDirectory, 'system-images', 'android-35', 'google_apis', 'x86_64'), {
       recursive: true,
     })
+    await Bun.write(
+      join(rootDirectory, 'system-images', 'android-36', 'google_apis_playstore', 'arm64-v8a', 'source.properties'),
+      '',
+    )
+    await Bun.write(
+      join(rootDirectory, 'system-images', 'android-35', 'google_apis', 'x86_64', 'source.properties'),
+      '',
+    )
 
     expect(await listInstalledSystemImages(rootDirectory)).toEqual([
       'system-images;android-35;google_apis;x86_64',
@@ -195,6 +210,41 @@ test('listInstalledAvds discovers installed AVDs and sorts them alphabetically',
   } finally {
     await rm(homeDirectory, { force: true, recursive: true })
   }
+})
+
+test('listRunningAvds discovers running emulators and sorts them alphabetically', async () => {
+  expect(
+    await listRunningAvds(async (cmd) => {
+      if (cmd[0] === 'adb' && cmd[1] === 'devices') {
+        return `
+List of devices attached
+R9 device
+emulator-5556 device
+emulator-5554 device
+emulator-5558 offline
+`
+      }
+
+      if (cmd[0] === 'adb' && cmd[1] === '-s' && cmd[2] === 'emulator-5554') {
+        return 'Zed\nOK\n'
+      }
+
+      if (cmd[0] === 'adb' && cmd[1] === '-s' && cmd[2] === 'emulator-5556') {
+        return 'Alpha\nOK\n'
+      }
+
+      return ''
+    }),
+  ).toEqual([
+    {
+      name: 'Alpha',
+      serial: 'emulator-5556',
+    },
+    {
+      name: 'Zed',
+      serial: 'emulator-5554',
+    },
+  ])
 })
 
 test('listAvailableAvdDevices parses and sorts available device definitions', async () => {
@@ -612,6 +662,7 @@ test('createOrUpdateAvd installs a missing system image, creates the AVD, and wr
     await mkdir(homeDirectory, { recursive: true })
     await mkdir(join(sdkRoot, 'cmdline-tools', 'latest', 'bin'), { recursive: true })
     await mkdir(join(sdkRoot, 'emulator'), { recursive: true })
+    await mkdir(join(systemImagePackageToDirectory(sdkRoot, DEFAULT_SYSTEM_IMAGE), '.installer'), { recursive: true })
 
     const result = await createOrUpdateAvd(
       {
@@ -624,7 +675,10 @@ test('createOrUpdateAvd installs a missing system image, creates the AVD, and wr
           commands.push({ cmd, stdin: options.stdin })
 
           if (cmd[0].endsWith('/sdkmanager')) {
-            await mkdir(systemImagePackageToDirectory(sdkRoot, cmd[2] as string), { recursive: true })
+            const systemImageDirectory = systemImagePackageToDirectory(sdkRoot, cmd[2] as string)
+
+            await mkdir(systemImageDirectory, { recursive: true })
+            await Bun.write(join(systemImageDirectory, 'source.properties'), '')
           }
 
           if (cmd[0].endsWith('/avdmanager')) {
@@ -696,6 +750,7 @@ test('createOrUpdateAvd updates an existing AVD without recreating it', async ()
 
   try {
     await mkdir(systemImagePackageToDirectory(sdkRoot, DEFAULT_SYSTEM_IMAGE), { recursive: true })
+    await Bun.write(join(systemImagePackageToDirectory(sdkRoot, DEFAULT_SYSTEM_IMAGE), 'source.properties'), '')
     await mkdir(avdDirectory, { recursive: true })
     await Bun.write(join(avdDirectory, 'config.ini'), 'hw.ramSize=1024\nz.keep=value\n')
 
@@ -748,6 +803,7 @@ test('createOrUpdateAvd falls back to the nearest creatable Pixel profile for ne
     await mkdir(join(sdkRoot, 'cmdline-tools', 'latest', 'bin'), { recursive: true })
     await mkdir(join(sdkRoot, 'emulator'), { recursive: true })
     await mkdir(systemImagePackageToDirectory(sdkRoot, DEFAULT_SYSTEM_IMAGE), { recursive: true })
+    await Bun.write(join(systemImagePackageToDirectory(sdkRoot, DEFAULT_SYSTEM_IMAGE), 'source.properties'), '')
     await Bun.write(studioJarPath, '')
 
     const result = await createOrUpdateAvd(
@@ -1165,6 +1221,103 @@ test('avd create starts the AVD when the confirmation is accepted', async () => 
   expect(result.tables).toEqual([])
 })
 
+test('avd start prompts for an installed AVD and starts it', async () => {
+  let receivedSelectOptions: SelectOptions<string> | undefined
+  let receivedStartArguments: Parameters<typeof startAvd> | undefined
+
+  const result = await executeCli(['avd', 'start'], {
+    runListInstalledAvds: async () => [
+      {
+        device: 'pixel_8_pro',
+        name: 'Alpha',
+        readOnly: true,
+        target: 'android-35',
+      },
+      {
+        device: 'pixel_9_pro_xl',
+        name: 'Zed',
+        target: 'android-36',
+      },
+    ],
+    runResolveAndroidSdkRoot: () => '/sdk',
+    runSelect: async <T>(options: SelectOptions<T>) => {
+      receivedSelectOptions = options as SelectOptions<string>
+
+      return 'Zed' as T
+    },
+    runStartAvd: async (...args) => {
+      receivedStartArguments = args
+    },
+  })
+
+  expect(receivedSelectOptions).toEqual({
+    choices: [
+      {
+        hint: '(device: pixel_8_pro, target: android-35, read only)',
+        label: 'Alpha (read only)',
+        value: 'Alpha',
+      },
+      {
+        hint: '(device: pixel_9_pro_xl, target: android-36)',
+        label: 'Zed',
+        value: 'Zed',
+      },
+    ],
+    message: 'Select an AVD to start',
+  })
+  expect(receivedStartArguments).toEqual(['/sdk/emulator/emulator', 'Zed'])
+  expect(result.errors).toEqual([])
+  expect(result.exitCode ?? 0).toBe(0)
+  expect(result.logs).toEqual(['Started AVD: Zed'])
+  expect(result.tables).toEqual([])
+})
+
+test('avd start accepts an explicit AVD name', async () => {
+  let selectCalls = 0
+  let receivedStartArguments: Parameters<typeof startAvd> | undefined
+
+  const result = await executeCli(['avd', 'start', 'Alpha'], {
+    runListInstalledAvds: async () => [
+      {
+        name: 'Alpha',
+      },
+    ],
+    runResolveAndroidSdkRoot: () => '/sdk',
+    runSelect: async <T>() => {
+      selectCalls += 1
+
+      return '' as T
+    },
+    runStartAvd: async (...args) => {
+      receivedStartArguments = args
+    },
+  })
+
+  expect(selectCalls).toBe(0)
+  expect(receivedStartArguments).toEqual(['/sdk/emulator/emulator', 'Alpha'])
+  expect(result.errors).toEqual([])
+  expect(result.exitCode ?? 0).toBe(0)
+  expect(result.logs).toEqual(['Started AVD: Alpha'])
+  expect(result.tables).toEqual([])
+})
+
+test('avd start requires an interactive terminal or an explicit AVD name', async () => {
+  const result = await executeCli(['avd', 'start'], {
+    runListInstalledAvds: async () => [
+      {
+        name: 'Alpha',
+      },
+    ],
+    runSelect: async () => {
+      throw new NonInteractiveError()
+    },
+  })
+
+  expect(result.errors).toEqual(['Error: avd start requires an interactive terminal or an explicit AVD name.'])
+  expect(result.exitCode).toBe(1)
+  expect(result.tables).toEqual([])
+})
+
 test('avd set prompts for an AVD and writes an adbee property', async () => {
   let receivedProperties: Record<string, string> | undefined
   let receivedSelectOptions: SelectOptions<string> | undefined
@@ -1231,6 +1384,104 @@ test('avd set requires KEY=VALUE assignment syntax', async () => {
   const result = await executeCli(['avd', 'set', 'readOnly'], {})
 
   expect(result.errors).toEqual(['Error: Expected KEY=VALUE, for example "readOnly=1".'])
+  expect(result.exitCode).toBe(1)
+  expect(result.tables).toEqual([])
+})
+
+test('avd stop prompts for a running AVD and stops it', async () => {
+  let receivedSelectOptions: SelectOptions<string> | undefined
+  let receivedStopSerial: string | undefined
+
+  const result = await executeCli(['avd', 'stop'], {
+    runListRunningAvds: async () => [
+      {
+        name: 'Alpha',
+        serial: 'emulator-5554',
+      },
+      {
+        name: 'Zed',
+        serial: 'emulator-5556',
+      },
+    ],
+    runSelect: async <T>(options: SelectOptions<T>) => {
+      receivedSelectOptions = options as SelectOptions<string>
+
+      return 'emulator-5556' as T
+    },
+    runStopRunningAvd: async (serial) => {
+      receivedStopSerial = serial
+    },
+  })
+
+  expect(receivedSelectOptions).toEqual({
+    choices: [
+      {
+        hint: '(serial: emulator-5554)',
+        label: 'Alpha',
+        value: 'emulator-5554',
+      },
+      {
+        hint: '(serial: emulator-5556)',
+        label: 'Zed',
+        value: 'emulator-5556',
+      },
+    ],
+    message: 'Select a running AVD to stop',
+  })
+  expect(receivedStopSerial).toBe('emulator-5556')
+  expect(result.errors).toEqual([])
+  expect(result.exitCode ?? 0).toBe(0)
+  expect(result.logs).toEqual(['Stopped AVD: Zed (emulator-5556)'])
+  expect(result.tables).toEqual([])
+})
+
+test('avd stop accepts an explicit running AVD name', async () => {
+  let selectCalls = 0
+  let receivedStopSerial: string | undefined
+
+  const result = await executeCli(['avd', 'stop', 'Zed'], {
+    runListRunningAvds: async () => [
+      {
+        name: 'Alpha',
+        serial: 'emulator-5554',
+      },
+      {
+        name: 'Zed',
+        serial: 'emulator-5556',
+      },
+    ],
+    runSelect: async <T>() => {
+      selectCalls += 1
+
+      return '' as T
+    },
+    runStopRunningAvd: async (serial) => {
+      receivedStopSerial = serial
+    },
+  })
+
+  expect(selectCalls).toBe(0)
+  expect(receivedStopSerial).toBe('emulator-5556')
+  expect(result.errors).toEqual([])
+  expect(result.exitCode ?? 0).toBe(0)
+  expect(result.logs).toEqual(['Stopped AVD: Zed (emulator-5556)'])
+  expect(result.tables).toEqual([])
+})
+
+test('avd stop requires an interactive terminal or an explicit running AVD name', async () => {
+  const result = await executeCli(['avd', 'stop'], {
+    runListRunningAvds: async () => [
+      {
+        name: 'Alpha',
+        serial: 'emulator-5554',
+      },
+    ],
+    runSelect: async () => {
+      throw new NonInteractiveError()
+    },
+  })
+
+  expect(result.errors).toEqual(['Error: avd stop requires an interactive terminal or an explicit running AVD name.'])
   expect(result.exitCode).toBe(1)
   expect(result.tables).toEqual([])
 })

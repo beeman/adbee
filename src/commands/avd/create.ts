@@ -26,10 +26,12 @@ import {
   type listInstalledPlatforms,
   listInstalledSystemImages,
   listKnownAvdDevices,
+  type listRunningAvds,
   resolveAndroidSdkRoot,
   resolveAvailableAvdName,
   type setAvdProperties,
   startAvd,
+  type stopRunningAvd,
 } from '../../avd.ts'
 
 type CommandBuilder = Crust
@@ -45,11 +47,13 @@ export interface CreateAvdCommandDependencies {
   runListInstalledAvds?: typeof listInstalledAvds
   runListInstalledPlatforms?: typeof listInstalledPlatforms
   runListInstalledSystemImages?: typeof listInstalledSystemImages
+  runListRunningAvds?: typeof listRunningAvds
   runMultiselect?: typeof multiselect
   runResolveAndroidSdkRoot?: typeof resolveAndroidSdkRoot
   runSelect?: typeof select
   runSetAvdProperties?: typeof setAvdProperties
   runStartAvd?: typeof startAvd
+  runStopRunningAvd?: typeof stopRunningAvd
 }
 
 function getDefaultSystemImage(installedSystemImages: readonly string[]): string {

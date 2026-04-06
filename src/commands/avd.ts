@@ -7,6 +7,8 @@ import { createAvdImagesCommand } from './avd/images.ts'
 import { createAvdListCommand } from './avd/list.ts'
 import { createAvdPlatformsCommand } from './avd/platforms.ts'
 import { createAvdSetCommand } from './avd/set.ts'
+import { createAvdStartCommand } from './avd/start.ts'
+import { createAvdStopCommand } from './avd/stop.ts'
 
 type CommandBuilder = Crust
 
@@ -24,4 +26,6 @@ export function createAvdCommand(app: CommandBuilder, dependencies: CreateAvdCom
     .command(createAvdListCommand(avdCommand, dependencies))
     .command(createAvdPlatformsCommand(avdCommand, dependencies))
     .command(createAvdSetCommand(avdCommand, dependencies))
+    .command(createAvdStartCommand(avdCommand, dependencies))
+    .command(createAvdStopCommand(avdCommand, dependencies))
 }
