@@ -115,15 +115,22 @@ interface ParsedSystemImagePackage {
   tagId: string
 }
 
+interface BuildAvdConfigOverrides {
+  deleteKeys?: readonly string[]
+  deviceDetails?: AvailableAvdDeviceDetails
+}
+
 function capitalize(value: string): string {
   return value.length === 0 ? value : `${value[0]?.toUpperCase()}${value.slice(1).toLowerCase()}`
 }
 
-function createAvdConfigValues(options: ResolvedCreateAvdOptions): Record<string, string> {
+function createAvdConfigValues(
+  options: ResolvedCreateAvdOptions,
+  deviceDetails?: AvailableAvdDeviceDetails,
+): Record<string, string> {
   const { abi, platform, tagId } = parseSystemImagePackage(options.systemImage)
   const tagDisplay = getTagDisplay(tagId)
-
-  return {
+  const values = {
     'abi.type': abi,
     'avd.ini.displayname': options.name.replaceAll('_', ' '),
     'disk.dataPartition.size': options.dataSize,
@@ -155,6 +162,39 @@ function createAvdConfigValues(options: ResolvedCreateAvdOptions): Record<string
     'userdata.useQcow2': 'no',
     'vm.heapSize': String(options.vmHeapMb),
   }
+
+  if (deviceDetails) {
+    Object.assign(values, createAvdDeviceConfigValues(deviceDetails))
+  }
+
+  return values
+}
+
+function createAvdDeviceConfigValues(deviceDetails: AvailableAvdDeviceDetails): Record<string, string> {
+  const values: Record<string, string> = {
+    'hw.device.name': deviceDetails.device,
+  }
+  const density = parseAvdDeviceDensity(deviceDetails.density)
+  const resolution = parseAvdDeviceResolution(deviceDetails.resolution)
+
+  if (density) {
+    values['hw.lcd.density'] = density
+  }
+
+  if (deviceDetails.oem) {
+    values['hw.device.manufacturer'] = deviceDetails.oem
+  }
+
+  if (deviceDetails.playStore !== undefined) {
+    values['PlayStore.enabled'] = String(deviceDetails.playStore)
+  }
+
+  if (resolution) {
+    values['hw.lcd.height'] = resolution.height
+    values['hw.lcd.width'] = resolution.width
+  }
+
+  return values
 }
 
 async function defaultReadDirectory(directoryPath: string): Promise<readonly DirectoryEntry[]> {
@@ -269,6 +309,47 @@ function parseAvailableAvdDeviceDetails(contents: string): AvailableAvdDeviceDet
     .sort((left, right) => left.device.localeCompare(right.device))
 }
 
+function parseAvdDeviceDensity(density: string | undefined): string | undefined {
+  if (!density) {
+    return undefined
+  }
+
+  const numericDensityMatch = density.match(/(\d+)/)
+
+  if (numericDensityMatch?.[1]) {
+    return numericDensityMatch[1]
+  }
+
+  const normalizedDensity = density.trim().toLowerCase()
+
+  return {
+    hdpi: '240',
+    ldpi: '120',
+    mdpi: '160',
+    tvdpi: '213',
+    xhdpi: '320',
+    xxhdpi: '480',
+    xxxhdpi: '640',
+  }[normalizedDensity]
+}
+
+function parseAvdDeviceResolution(resolution: string | undefined): { height: string; width: string } | undefined {
+  if (!resolution) {
+    return undefined
+  }
+
+  const resolutionMatch = resolution.match(/^(\d+)x(\d+)$/)
+
+  if (!resolutionMatch?.[1] || !resolutionMatch[2]) {
+    return undefined
+  }
+
+  return {
+    height: resolutionMatch[2],
+    width: resolutionMatch[1],
+  }
+}
+
 function parsePixelDeviceGeneration(device: string): number | undefined {
   const match = device.match(/^pixel_(\d+)/)
 
@@ -306,6 +387,51 @@ function formatNameSegment(segment: string): string {
   }
 
   return capitalize(segment)
+}
+
+function resolveCreatableAvdDevice(
+  requestedDevice: string,
+  availableDevices: readonly AvailableAvdDevice[],
+): string | undefined {
+  if (availableDevices.some(({ device }) => device === requestedDevice)) {
+    return requestedDevice
+  }
+
+  return resolvePixelAvdDeviceFallback(requestedDevice, availableDevices)
+}
+
+function resolvePixelAvdDeviceFallback(
+  requestedDevice: string,
+  availableDevices: readonly AvailableAvdDevice[],
+): string | undefined {
+  const requestedMatch = requestedDevice.match(/^pixel_(\d+)(.*)$/)
+
+  if (!requestedMatch?.[1]) {
+    return undefined
+  }
+
+  const [, , suffix = ''] = requestedMatch
+  const availablePixelDevices = availableDevices
+    .map(({ device }) => ({
+      device,
+      generation: parsePixelDeviceGeneration(device),
+    }))
+    .filter(({ generation }) => generation !== undefined)
+    .sort((left, right) => (right.generation as number) - (left.generation as number))
+
+  const latestPixelGeneration = availablePixelDevices[0]?.generation
+
+  if (latestPixelGeneration === undefined) {
+    return undefined
+  }
+
+  const sameFamilyDevice = `pixel_${latestPixelGeneration}${suffix}`
+
+  if (availablePixelDevices.some(({ device }) => device === sameFamilyDevice)) {
+    return sameFamilyDevice
+  }
+
+  return availablePixelDevices.find(({ device }) => device.endsWith(suffix))?.device
 }
 
 function formatTagName(tagId: string): string {
@@ -397,6 +523,17 @@ function getAvdDeviceDefinitionJarPaths(sdkRoot: string): string[] {
   ]
 }
 
+function getAndroidStudioAvdDeviceDefinitionJarPaths(homeDirectory: string): string[] {
+  return [
+    '/Applications/Android Studio.app/Contents/plugins/android/lib/sdklib.jar',
+    join(homeDirectory, 'Applications', 'Android Studio.app', 'Contents', 'plugins', 'android', 'lib', 'sdklib.jar'),
+  ]
+}
+
+function getKnownAvdDeviceDefinitionJarPaths(sdkRoot: string, homeDirectory: string): string[] {
+  return [...getAndroidStudioAvdDeviceDefinitionJarPaths(homeDirectory), ...getAvdDeviceDefinitionJarPaths(sdkRoot)]
+}
+
 function getAvdConfigPath(homeDirectory: string, avdName: string): string {
   return join(homeDirectory, '.android', 'avd', `${avdName}.avd`, 'config.ini')
 }
@@ -462,11 +599,19 @@ function resolveCreateAvdOptions(
   }
 }
 
-export function buildAvdConfig(existingConfig: string, options: CreateAvdOptions): string {
+export function buildAvdConfig(
+  existingConfig: string,
+  options: CreateAvdOptions,
+  overrides: BuildAvdConfigOverrides = {},
+): string {
   const resolvedOptions = resolveCreateAvdOptions(options, homedir)
   const mergedValues = parseConfigValues(existingConfig)
 
-  Object.assign(mergedValues, createAvdConfigValues(resolvedOptions))
+  for (const key of overrides.deleteKeys ?? []) {
+    delete mergedValues[key]
+  }
+
+  Object.assign(mergedValues, createAvdConfigValues(resolvedOptions, overrides.deviceDetails))
 
   return `${Object.keys(mergedValues)
     .sort((left, right) => left.localeCompare(right))
@@ -498,6 +643,7 @@ export async function createOrUpdateAvd(
   const toolPaths = getToolPaths(resolvedOptions.sdkRoot)
   const { abi } = parseSystemImagePackage(resolvedOptions.systemImage)
   const systemImageDirectory = systemImagePackageToDirectory(resolvedOptions.sdkRoot, resolvedOptions.systemImage)
+  let configOverrides: BuildAvdConfigOverrides = {}
 
   if (!(await pathExists(systemImageDirectory))) {
     await runCommandDependency([toolPaths.sdkmanager, '--install', resolvedOptions.systemImage])
@@ -512,6 +658,20 @@ export async function createOrUpdateAvd(
   let created = false
 
   if (!(await pathExists(avdDirectory))) {
+    const availableAvdDevices = await listAvailableAvdDevices(resolvedOptions.sdkRoot, runCommandDependency)
+    const requestedDeviceDetails = await getAvailableAvdDeviceDetails(resolvedOptions.device, resolvedOptions.sdkRoot, {
+      getHomeDirectory,
+      pathExists,
+      runCommand: runCommandDependency,
+    }).catch(() => undefined)
+    const createdDevice =
+      resolveCreatableAvdDevice(resolvedOptions.device, availableAvdDevices) ?? resolvedOptions.device
+
+    configOverrides = {
+      deleteKeys: createdDevice === resolvedOptions.device ? [] : ['hw.device.hash2', 'skin.name', 'skin.path'],
+      deviceDetails: requestedDeviceDetails,
+    }
+
     await runCommandDependency(
       [
         toolPaths.avdmanager,
@@ -520,7 +680,7 @@ export async function createOrUpdateAvd(
         '--abi',
         abi,
         '--device',
-        resolvedOptions.device,
+        createdDevice,
         '--force',
         '--name',
         resolvedOptions.name,
@@ -540,7 +700,7 @@ export async function createOrUpdateAvd(
 
   const existingConfig = (await pathExists(avdConfigPath)) ? await readTextFile(avdConfigPath) : ''
 
-  await writeTextFile(avdConfigPath, buildAvdConfig(existingConfig, resolvedOptions))
+  await writeTextFile(avdConfigPath, buildAvdConfig(existingConfig, resolvedOptions, configOverrides))
 
   return {
     avdName: resolvedOptions.name,
@@ -645,31 +805,42 @@ export async function getAvailableAvdDeviceDetails(
   sdkRoot: string,
   dependencies: CreateAvdDependencies = {},
 ): Promise<AvailableAvdDeviceDetails | undefined> {
+  const details = await listAvailableAvdDeviceDetails(sdkRoot, dependencies)
+
+  return details.find(({ device: availableDevice }) => availableDevice === device)
+}
+
+async function listAvailableAvdDeviceDetails(
+  sdkRoot: string,
+  dependencies: CreateAvdDependencies = {},
+): Promise<AvailableAvdDeviceDetails[]> {
+  const getHomeDirectory = dependencies.getHomeDirectory ?? homedir
   const pathExists = dependencies.pathExists ?? getDefaultPathExists()
   const runCommandDependency = dependencies.runCommand ?? runCommand
-  const jarPath = (
-    await Promise.all(
-      getAvdDeviceDefinitionJarPaths(sdkRoot).map(async (candidatePath) =>
-        (await pathExists(candidatePath)) ? candidatePath : undefined,
-      ),
-    )
-  ).find(Boolean)
+  const detailsByDevice = new Map<string, AvailableAvdDeviceDetails>()
+  let foundJar = false
 
-  if (!jarPath) {
-    throw new Error(`AVD device definition jar does not exist under ${sdkRoot}`)
-  }
+  for (const jarPath of getKnownAvdDeviceDefinitionJarPaths(sdkRoot, getHomeDirectory())) {
+    if (!(await pathExists(jarPath))) {
+      continue
+    }
 
-  for (const entryPath of AVAILABLE_AVD_DEVICE_DEFINITION_JAR_ENTRIES) {
-    const details = parseAvailableAvdDeviceDetails(
-      await runCommandDependency(['unzip', '-p', jarPath, entryPath]),
-    ).find(({ device: availableDevice }) => availableDevice === device)
+    foundJar = true
 
-    if (details) {
-      return details
+    for (const entryPath of AVAILABLE_AVD_DEVICE_DEFINITION_JAR_ENTRIES) {
+      for (const details of parseAvailableAvdDeviceDetails(
+        await runCommandDependency(['unzip', '-p', jarPath, entryPath]),
+      )) {
+        detailsByDevice.set(details.device, details)
+      }
     }
   }
 
-  return undefined
+  if (!foundJar) {
+    throw new Error(`AVD device definition jar does not exist under ${sdkRoot}`)
+  }
+
+  return [...detailsByDevice.values()].sort((left, right) => left.device.localeCompare(right.device))
 }
 
 export function filterLatestPixelAvdDevices(devices: readonly AvailableAvdDevice[]): AvailableAvdDevice[] {
@@ -699,6 +870,32 @@ export async function listAvailableAvdDevices(
   const { avdmanager } = getToolPaths(sdkRoot)
 
   return parseAvailableAvdDevices(await runListCommand([avdmanager, 'list', 'device']))
+}
+
+export async function listKnownAvdDevices(
+  sdkRoot: string,
+  dependencies: CreateAvdDependencies = {},
+): Promise<AvailableAvdDevice[]> {
+  const runCommandDependency = dependencies.runCommand ?? runCommand
+
+  try {
+    const details = await listAvailableAvdDeviceDetails(sdkRoot, dependencies)
+
+    if (details.length > 0) {
+      return details
+        .map(({ device, name, oem, tag }) => ({
+          device,
+          name,
+          oem,
+          tag,
+        }))
+        .sort((left, right) => left.device.localeCompare(right.device))
+    }
+  } catch {
+    // Fall back to avdmanager when the local XML catalogs are unavailable.
+  }
+
+  return listAvailableAvdDevices(sdkRoot, runCommandDependency)
 }
 
 export async function listInstalledPlatforms(

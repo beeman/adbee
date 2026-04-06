@@ -21,10 +21,11 @@ import {
   deriveDefaultAvdName,
   filterLatestPixelAvdDevices,
   type getAvailableAvdDeviceDetails,
-  listAvailableAvdDevices,
+  type listAvailableAvdDevices,
   listInstalledAvds,
   type listInstalledPlatforms,
   listInstalledSystemImages,
+  listKnownAvdDevices,
   resolveAndroidSdkRoot,
   resolveAvailableAvdName,
   type setAvdProperties,
@@ -82,7 +83,7 @@ export function createAvdCreateCommand(avdCommand: CommandBuilder, dependencies:
   const runCreateOrUpdateAvd = dependencies.runCreateOrUpdateAvd ?? createOrUpdateAvd
   const runFilter = dependencies.runFilter ?? filter
   const runInput = dependencies.runInput ?? input
-  const runListAvailableAvdDevices = dependencies.runListAvailableAvdDevices ?? listAvailableAvdDevices
+  const runListAvailableAvdDevices = dependencies.runListAvailableAvdDevices ?? listKnownAvdDevices
   const runListInstalledAvds = dependencies.runListInstalledAvds ?? listInstalledAvds
   const runListInstalledSystemImages = dependencies.runListInstalledSystemImages ?? listInstalledSystemImages
   const runResolveAndroidSdkRoot = dependencies.runResolveAndroidSdkRoot ?? resolveAndroidSdkRoot

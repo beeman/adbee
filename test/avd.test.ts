@@ -32,6 +32,7 @@ import {
   listInstalledAvds,
   listInstalledPlatforms,
   listInstalledSystemImages,
+  listKnownAvdDevices,
   resolveAndroidSdkRoot,
   resolveAvailableAvdName,
   setAvdProperties,
@@ -236,6 +237,78 @@ id: 11 or "desktop_large"
   ])
 })
 
+test('listKnownAvdDevices falls back to Android Studio definitions when they are newer than the SDK jars', async () => {
+  const studioJarPath = '/Users/example/Applications/Android Studio.app/Contents/plugins/android/lib/sdklib.jar'
+  const sdkJarPath = '/sdk/cmdline-tools/latest/lib/sdklib/tools.sdklib.jar'
+  const emptyDevicesXml = `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+</d:devices>
+`
+  const devices = await listKnownAvdDevices('/sdk', {
+    getHomeDirectory: () => '/Users/example',
+    pathExists: async (filePath) => filePath === sdkJarPath || filePath === studioJarPath,
+    runCommand: async (cmd) => {
+      const jarPath = cmd[2]
+      const entryPath = cmd[3]
+
+      if (entryPath !== 'com/android/sdklib/devices/nexus.xml') {
+        return emptyDevicesXml
+      }
+
+      if (jarPath === sdkJarPath) {
+        return `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+  <d:device>
+    <d:name>Pixel 9 Pro XL</d:name>
+    <d:id>pixel_9_pro_xl</d:id>
+    <d:manufacturer>Google</d:manufacturer>
+  </d:device>
+</d:devices>
+`
+      }
+
+      return `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+  <d:device>
+    <d:name>Pixel 10</d:name>
+    <d:id>pixel_10</d:id>
+    <d:manufacturer>Google</d:manufacturer>
+  </d:device>
+  <d:device>
+    <d:name>Pixel 10 Pro XL</d:name>
+    <d:id>pixel_10_pro_xl</d:id>
+    <d:manufacturer>Google</d:manufacturer>
+  </d:device>
+</d:devices>
+`
+    },
+  })
+
+  expect(devices).toEqual([
+    {
+      device: 'pixel_10',
+      name: 'Pixel 10',
+      oem: 'Google',
+      tag: undefined,
+    },
+    {
+      device: 'pixel_10_pro_xl',
+      name: 'Pixel 10 Pro XL',
+      oem: 'Google',
+      tag: undefined,
+    },
+    {
+      device: 'pixel_9_pro_xl',
+      name: 'Pixel 9 Pro XL',
+      oem: 'Google',
+      tag: undefined,
+    },
+  ])
+})
+
 test('getAvailableAvdDeviceDetails reads device metadata from the SDK definitions', async () => {
   const details = await getAvailableAvdDeviceDetails('pixel_9_pro_xl', '/sdk', {
     pathExists: async (filePath) => filePath === '/sdk/cmdline-tools/latest/lib/sdklib/tools.sdklib.jar',
@@ -280,6 +353,80 @@ test('getAvailableAvdDeviceDetails reads device metadata from the SDK definition
     device: 'pixel_9_pro_xl',
     diagonalLength: '6.8',
     name: 'Pixel 9 Pro XL',
+    oem: 'Google',
+    playStore: true,
+    resolution: '1344x2992',
+    screenRatio: 'long',
+    tag: undefined,
+  })
+})
+
+test('getAvailableAvdDeviceDetails falls back to Android Studio definitions when the SDK jars are stale', async () => {
+  const studioJarPath = '/Users/example/Applications/Android Studio.app/Contents/plugins/android/lib/sdklib.jar'
+  const sdkJarPath = '/sdk/cmdline-tools/latest/lib/sdklib/tools.sdklib.jar'
+  const emptyDevicesXml = `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+</d:devices>
+`
+  const details = await getAvailableAvdDeviceDetails('pixel_10_pro_xl', '/sdk', {
+    getHomeDirectory: () => '/Users/example',
+    pathExists: async (filePath) => filePath === sdkJarPath || filePath === studioJarPath,
+    runCommand: async (cmd) => {
+      const jarPath = cmd[2]
+      const entryPath = cmd[3]
+
+      if (entryPath !== 'com/android/sdklib/devices/nexus.xml') {
+        return emptyDevicesXml
+      }
+
+      if (jarPath === sdkJarPath) {
+        return `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+  <d:device>
+    <d:name>Pixel 9 Pro XL</d:name>
+    <d:id>pixel_9_pro_xl</d:id>
+    <d:manufacturer>Google</d:manufacturer>
+  </d:device>
+</d:devices>
+`
+      }
+
+      return `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+  <d:device>
+    <d:name>Pixel 10 Pro XL</d:name>
+    <d:id>pixel_10_pro_xl</d:id>
+    <d:manufacturer>Google</d:manufacturer>
+    <d:playstore-enabled>true</d:playstore-enabled>
+    <d:hardware>
+      <d:screen>
+        <d:diagonal-length>6.8</d:diagonal-length>
+        <d:pixel-density>480dpi</d:pixel-density>
+        <d:screen-ratio>long</d:screen-ratio>
+        <d:dimensions>
+          <d:x-dimension>1344</d:x-dimension>
+          <d:y-dimension>2992</d:y-dimension>
+        </d:dimensions>
+      </d:screen>
+    </d:hardware>
+    <d:software>
+      <d:api-level>36.1-</d:api-level>
+    </d:software>
+  </d:device>
+</d:devices>
+`
+    },
+  })
+
+  expect(details).toEqual({
+    apiLevel: '36.1-',
+    density: '480dpi',
+    device: 'pixel_10_pro_xl',
+    diagonalLength: '6.8',
+    name: 'Pixel 10 Pro XL',
     oem: 'Google',
     playStore: true,
     resolution: '1344x2992',
@@ -503,6 +650,10 @@ test('createOrUpdateAvd installs a missing system image, creates the AVD, and wr
         stdin: undefined,
       },
       {
+        cmd: [join(sdkRoot, 'cmdline-tools', 'latest', 'bin', 'avdmanager'), 'list', 'device'],
+        stdin: undefined,
+      },
+      {
         cmd: [
           join(sdkRoot, 'cmdline-tools', 'latest', 'bin', 'avdmanager'),
           'create',
@@ -566,6 +717,146 @@ test('createOrUpdateAvd updates an existing AVD without recreating it', async ()
     expect(commands).toEqual([])
     expect(await Bun.file(join(avdDirectory, 'config.ini')).text()).toContain('disk.dataPartition.size=64G')
     expect(await Bun.file(join(avdDirectory, 'config.ini')).text()).toContain('z.keep=value')
+  } finally {
+    await rm(rootDirectory, { force: true, recursive: true })
+  }
+})
+
+test('createOrUpdateAvd falls back to the nearest creatable Pixel profile for newer Studio-only devices', async () => {
+  const rootDirectory = await createTemporaryDirectory('adbee-avd-fallback-')
+  const homeDirectory = join(rootDirectory, 'home')
+  const sdkRoot = join(rootDirectory, 'sdk')
+  const studioJarPath = join(
+    homeDirectory,
+    'Applications',
+    'Android Studio.app',
+    'Contents',
+    'plugins',
+    'android',
+    'lib',
+    'sdklib.jar',
+  )
+  let receivedCreateDevice: string | undefined
+
+  try {
+    await mkdir(join(homeDirectory, 'Applications', 'Android Studio.app', 'Contents', 'plugins', 'android', 'lib'), {
+      recursive: true,
+    })
+    await mkdir(join(sdkRoot, 'cmdline-tools', 'latest', 'bin'), { recursive: true })
+    await mkdir(join(sdkRoot, 'emulator'), { recursive: true })
+    await mkdir(systemImagePackageToDirectory(sdkRoot, DEFAULT_SYSTEM_IMAGE), { recursive: true })
+    await Bun.write(studioJarPath, '')
+
+    const result = await createOrUpdateAvd(
+      {
+        device: 'pixel_10_pro_xl',
+        name: 'Pixel_10_Pro_XL_Play_36',
+        sdkRoot,
+        systemImage: DEFAULT_SYSTEM_IMAGE,
+      },
+      {
+        getHomeDirectory: () => homeDirectory,
+        runCommand: async (cmd, options = {}) => {
+          if (cmd[0] === 'unzip') {
+            const jarPath = cmd[2]
+            const entryPath = cmd[3]
+
+            if (entryPath !== 'com/android/sdklib/devices/nexus.xml') {
+              return `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+</d:devices>
+`
+            }
+
+            if (jarPath !== studioJarPath) {
+              return ''
+            }
+
+            return `
+<?xml version="1.0"?>
+<d:devices xmlns:d="http://schemas.android.com/sdk/devices/7">
+  <d:device>
+    <d:name>Pixel 10 Pro XL</d:name>
+    <d:id>pixel_10_pro_xl</d:id>
+    <d:manufacturer>Google</d:manufacturer>
+    <d:playstore-enabled>true</d:playstore-enabled>
+    <d:hardware>
+      <d:screen>
+        <d:pixel-density>480dpi</d:pixel-density>
+        <d:dimensions>
+          <d:x-dimension>1344</d:x-dimension>
+          <d:y-dimension>2992</d:y-dimension>
+        </d:dimensions>
+      </d:screen>
+    </d:hardware>
+  </d:device>
+</d:devices>
+`
+          }
+
+          if (cmd[0].endsWith('/avdmanager') && cmd[1] === 'list') {
+            return `
+Available devices definitions:
+id: 49 or "pixel_9_pro_xl"
+    Name: Pixel 9 Pro XL
+    OEM : Google
+---------
+`
+          }
+
+          if (cmd[0].endsWith('/avdmanager') && cmd[1] === 'create') {
+            receivedCreateDevice = cmd[cmd.indexOf('--device') + 1]
+
+            const avdName = cmd[cmd.indexOf('--name') + 1] as string
+            const avdDirectory = join(homeDirectory, '.android', 'avd', `${avdName}.avd`)
+
+            await mkdir(avdDirectory, { recursive: true })
+            await Bun.write(
+              join(avdDirectory, 'config.ini'),
+              [
+                'PlayStore.enabled=false',
+                'hw.device.hash2=MD5:legacy',
+                'hw.device.name=pixel_9_pro_xl',
+                'hw.lcd.density=320',
+                'hw.lcd.height=2400',
+                'hw.lcd.width=1080',
+                'skin.path=/tmp/fallback-skin',
+                'z.keep=value',
+                '',
+              ].join('\n'),
+            )
+
+            return options.stdin ?? ''
+          }
+
+          return ''
+        },
+      },
+    )
+
+    expect(result).toEqual({
+      avdName: 'Pixel_10_Pro_XL_Play_36',
+      created: true,
+      emulatorPath: join(sdkRoot, 'emulator', 'emulator'),
+      sdkRoot,
+      systemImage: DEFAULT_SYSTEM_IMAGE,
+    })
+    expect(receivedCreateDevice).toBe('pixel_9_pro_xl')
+
+    const config = await Bun.file(
+      join(homeDirectory, '.android', 'avd', 'Pixel_10_Pro_XL_Play_36.avd', 'config.ini'),
+    ).text()
+
+    expect(config).toContain('PlayStore.enabled=true')
+    expect(config).toContain('hw.device.manufacturer=Google')
+    expect(config).toContain('hw.device.name=pixel_10_pro_xl')
+    expect(config).toContain('hw.lcd.density=480')
+    expect(config).toContain('hw.lcd.height=2992')
+    expect(config).toContain('hw.lcd.width=1344')
+    expect(config).toContain('z.keep=value')
+    expect(config).not.toContain('hw.device.hash2=MD5:legacy')
+    expect(config).not.toContain('skin.path=/tmp/fallback-skin')
   } finally {
     await rm(rootDirectory, { force: true, recursive: true })
   }

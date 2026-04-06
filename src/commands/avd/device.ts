@@ -4,7 +4,7 @@ import {
   type AvailableAvdDevice,
   filterLatestPixelAvdDevices,
   getAvailableAvdDeviceDetails,
-  listAvailableAvdDevices,
+  listKnownAvdDevices,
   resolveAndroidSdkRoot,
 } from '../../avd.ts'
 import type { CreateAvdCommandDependencies } from './create.ts'
@@ -24,7 +24,7 @@ function createDeviceChoice({ device, name, oem }: AvailableAvdDevice) {
 export function createAvdDeviceCommand(avdCommand: CommandBuilder, dependencies: CreateAvdCommandDependencies = {}) {
   const runFilter = dependencies.runFilter ?? filter
   const runGetAvailableAvdDeviceDetails = dependencies.runGetAvailableAvdDeviceDetails ?? getAvailableAvdDeviceDetails
-  const runListAvailableAvdDevices = dependencies.runListAvailableAvdDevices ?? listAvailableAvdDevices
+  const runListAvailableAvdDevices = dependencies.runListAvailableAvdDevices ?? listKnownAvdDevices
   const runResolveAndroidSdkRoot = dependencies.runResolveAndroidSdkRoot ?? resolveAndroidSdkRoot
 
   return avdCommand

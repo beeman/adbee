@@ -1,11 +1,11 @@
 import type { Crust } from '@crustjs/core'
-import { filterLatestPixelAvdDevices, listAvailableAvdDevices, resolveAndroidSdkRoot } from '../../avd.ts'
+import { filterLatestPixelAvdDevices, listKnownAvdDevices, resolveAndroidSdkRoot } from '../../avd.ts'
 import type { CreateAvdCommandDependencies } from './create.ts'
 
 type CommandBuilder = Crust
 
 export function createAvdDevicesCommand(avdCommand: CommandBuilder, dependencies: CreateAvdCommandDependencies = {}) {
-  const runListAvailableAvdDevices = dependencies.runListAvailableAvdDevices ?? listAvailableAvdDevices
+  const runListAvailableAvdDevices = dependencies.runListAvailableAvdDevices ?? listKnownAvdDevices
   const runResolveAndroidSdkRoot = dependencies.runResolveAndroidSdkRoot ?? resolveAndroidSdkRoot
 
   return avdCommand
