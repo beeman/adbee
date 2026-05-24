@@ -28,7 +28,10 @@ import {
   deriveDefaultAvdName,
   filterLatestPixelAvdDevices,
   getAvailableAvdDeviceDetails,
+  type InstallAvdPackagesOptions,
+  installLatestAvdPackages,
   listAvailableAvdDevices,
+  listAvailableSystemImages,
   listInstalledAvds,
   listInstalledPlatforms,
   listInstalledSystemImages,
@@ -162,6 +165,31 @@ test('listInstalledSystemImages discovers installed packages and sorts them alph
   }
 })
 
+test('listAvailableSystemImages parses sdkmanager system image packages', async () => {
+  const commands: Array<[string, ...string[]]> = []
+  const systemImages = await listAvailableSystemImages('/sdk', async (cmd) => {
+    commands.push(cmd)
+
+    return `
+Installed packages:
+  Path                                                | Version | Description
+  system-images;android-36;google_apis;x86_64        | 1       | Google APIs Intel x86_64 Atom System Image
+Available Packages:
+  Path                                                        | Version | Description
+  platforms;android-37.0                                     | 1       | Android SDK Platform 37
+  system-images;android-37.0;google_apis;arm64-v8a           | 1       | Google APIs ARM 64 v8a System Image
+  system-images;android-37.0;google_apis_playstore;arm64-v8a | 1       | Google Play ARM 64 v8a System Image
+`
+  })
+
+  expect(commands).toEqual([['/sdk/cmdline-tools/latest/bin/sdkmanager', '--list']])
+  expect(systemImages).toEqual([
+    'system-images;android-36;google_apis;x86_64',
+    'system-images;android-37.0;google_apis_playstore;arm64-v8a',
+    'system-images;android-37.0;google_apis;arm64-v8a',
+  ])
+})
+
 test('listInstalledPlatforms discovers installed SDK platforms and sorts them alphabetically', async () => {
   const rootDirectory = await createTemporaryDirectory('adbee-platforms-')
 
@@ -174,6 +202,48 @@ test('listInstalledPlatforms discovers installed SDK platforms and sorts them al
   } finally {
     await rm(rootDirectory, { force: true, recursive: true })
   }
+})
+
+test('installLatestAvdPackages installs the latest stable platform and system image', async () => {
+  const commands: Array<[string, ...string[]]> = []
+  const result = await installLatestAvdPackages(
+    {
+      abi: 'arm64-v8a',
+      sdkRoot: '/sdk',
+    },
+    {
+      runCommand: async (cmd) => {
+        commands.push(cmd)
+
+        if (cmd[1] === '--list') {
+          return `
+Available Packages:
+  Path                                                        | Version | Description
+  system-images;android-36;google_apis_playstore;arm64-v8a   | 1       | Google Play ARM 64 v8a System Image
+  system-images;android-37.0;google_apis_playstore_ps16k;arm64-v8a | 4 | Pre-Release 16 KB Page Size Google Play ARM 64 v8a System Image
+  system-images;android-CANARY;google_apis_playstore;arm64-v8a | 1     | Google Play ARM 64 v8a System Image
+`
+        }
+
+        return ''
+      },
+    },
+  )
+
+  expect(commands).toEqual([
+    ['/sdk/cmdline-tools/latest/bin/sdkmanager', '--list'],
+    [
+      '/sdk/cmdline-tools/latest/bin/sdkmanager',
+      '--install',
+      'platforms;android-37.0',
+      'system-images;android-37.0;google_apis_playstore_ps16k;arm64-v8a',
+    ],
+  ])
+  expect(result).toEqual({
+    installedPackages: ['platforms;android-37.0', 'system-images;android-37.0;google_apis_playstore_ps16k;arm64-v8a'],
+    platform: 'android-37.0',
+    systemImage: 'system-images;android-37.0;google_apis_playstore_ps16k;arm64-v8a',
+  })
 })
 
 test('listInstalledAvds discovers installed AVDs and sorts them alphabetically', async () => {
@@ -2084,6 +2154,41 @@ test('avd images prints installed system images', async () => {
       },
     ],
   ])
+})
+
+test('avd install installs latest stable Android SDK packages', async () => {
+  let receivedOptions: InstallAvdPackagesOptions | undefined
+  const result = await executeCli(
+    ['avd', 'install', '--abi', 'arm64-v8a', '--platform', '37.0', '--tag', 'google_apis'],
+    {
+      runInstallLatestAvdPackages: async (options) => {
+        receivedOptions = options
+
+        return {
+          installedPackages: ['platforms;android-37.0', 'system-images;android-37.0;google_apis;arm64-v8a'],
+          platform: 'android-37.0',
+          systemImage: 'system-images;android-37.0;google_apis;arm64-v8a',
+        }
+      },
+      runResolveAndroidSdkRoot: () => '/sdk',
+    },
+  )
+
+  expect(receivedOptions).toEqual({
+    abi: 'arm64-v8a',
+    platform: '37.0',
+    sdkRoot: '/sdk',
+    systemImage: undefined,
+    tag: 'google_apis',
+  })
+  expect(result.errors).toEqual([])
+  expect(result.exitCode ?? 0).toBe(0)
+  expect(result.logs).toEqual([
+    'Installed Android SDK packages:',
+    'platforms;android-37.0',
+    'system-images;android-37.0;google_apis;arm64-v8a',
+  ])
+  expect(result.tables).toEqual([])
 })
 
 test('avd platforms prints installed SDK platforms', async () => {

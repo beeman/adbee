@@ -21,6 +21,7 @@ import {
   deriveDefaultAvdName,
   filterLatestPixelAvdDevices,
   type getAvailableAvdDeviceDetails,
+  type installLatestAvdPackages,
   type listAvailableAvdDevices,
   listInstalledAvds,
   type listInstalledPlatforms,
@@ -43,6 +44,7 @@ export interface CreateAvdCommandDependencies {
   runFilter?: typeof filter
   runGetAvailableAvdDeviceDetails?: typeof getAvailableAvdDeviceDetails
   runInput?: typeof input
+  runInstallLatestAvdPackages?: typeof installLatestAvdPackages
   runListAvailableAvdDevices?: typeof listAvailableAvdDevices
   runListInstalledAvds?: typeof listInstalledAvds
   runListInstalledPlatforms?: typeof listInstalledPlatforms

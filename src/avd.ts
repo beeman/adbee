@@ -1,6 +1,6 @@
 import { constants } from 'node:fs'
 import { access, readdir } from 'node:fs/promises'
-import { homedir } from 'node:os'
+import { arch, homedir } from 'node:os'
 import { basename, join } from 'node:path'
 
 const FORMAT_NAME_SEGMENT_OVERRIDES = {
@@ -23,12 +23,19 @@ const TAG_DISPLAY_OVERRIDES = {
   google_apis: 'Google APIs',
   google_apis_playstore: 'Google Play',
 } as const
+const PREFERRED_SYSTEM_IMAGE_TAGS = [
+  'google_apis_playstore',
+  'google_apis',
+  'google_apis_playstore_ps16k',
+  'google_apis_ps16k',
+] as const
 
 export const DEFAULT_DATA_SIZE = '32G'
 export const DEFAULT_DEVICE = 'pixel_9_pro_xl'
 export const DEFAULT_RAM_MB = 8192
 export const DEFAULT_SDCARD_SIZE = '512M'
 export const DEFAULT_SYSTEM_IMAGE = 'system-images;android-36;google_apis_playstore;arm64-v8a'
+export const DEFAULT_SYSTEM_IMAGE_TAG = 'google_apis_playstore'
 export const DEFAULT_VM_HEAP_MB = 576
 
 interface DirectoryEntry {
@@ -76,6 +83,24 @@ export interface InstalledAvd {
   name: string
   readOnly?: boolean
   target?: string
+}
+
+export interface InstallAvdPackagesOptions {
+  abi?: string
+  platform?: string
+  sdkRoot?: string
+  systemImage?: string
+  tag?: string
+}
+
+export interface InstallAvdPackagesDependencies {
+  runCommand?: CommandRunner
+}
+
+export interface InstallAvdPackagesResult {
+  installedPackages: string[]
+  platform: string
+  systemImage: string
 }
 
 export interface RunningAvd {
@@ -649,6 +674,88 @@ function formatRandomAvdNameSuffix(randomNumber: number): string {
   return String(Math.abs(Math.trunc(randomNumber)) % 100000).padStart(5, '0')
 }
 
+function compareStableAndroidPlatforms(left: string, right: string): number {
+  const leftParts = parseStableAndroidPlatform(left) ?? []
+  const rightParts = parseStableAndroidPlatform(right) ?? []
+  const partCount = Math.max(leftParts.length, rightParts.length)
+
+  for (let index = 0; index < partCount; index += 1) {
+    const difference = (leftParts[index] ?? 0) - (rightParts[index] ?? 0)
+
+    if (difference !== 0) {
+      return difference
+    }
+  }
+
+  return left.localeCompare(right)
+}
+
+function getDefaultSystemImageAbi(hostArchitecture: string = arch()): string {
+  return hostArchitecture === 'arm64' ? 'arm64-v8a' : 'x86_64'
+}
+
+function getSystemImageTagRank(tag: string): number {
+  const rank = PREFERRED_SYSTEM_IMAGE_TAGS.indexOf(tag as (typeof PREFERRED_SYSTEM_IMAGE_TAGS)[number])
+
+  return rank === -1 ? PREFERRED_SYSTEM_IMAGE_TAGS.length : rank
+}
+
+function normalizeAndroidPlatform(platform: string): string {
+  return platform.startsWith('android-') ? platform : `android-${platform}`
+}
+
+function parseSdkmanagerPackagePaths(output: string): string[] {
+  return output
+    .split('\n')
+    .map((line) => line.trim().split(/\s+\|/)[0]?.trim())
+    .filter((packagePath): packagePath is string => Boolean(packagePath?.includes(';')))
+}
+
+function parseStableAndroidPlatform(platform: string): number[] | undefined {
+  const match = /^android-(\d+(?:\.\d+)*)$/.exec(platform)
+
+  return match?.[1]?.split('.').map(Number)
+}
+
+function resolveLatestStableSystemImage(
+  systemImages: readonly string[],
+  options: InstallAvdPackagesOptions = {},
+): string {
+  const abi = options.abi ?? getDefaultSystemImageAbi()
+  const platform = options.platform ? normalizeAndroidPlatform(options.platform) : undefined
+  const parsedSystemImages = systemImages.map((systemImage) => ({
+    ...parseSystemImagePackage(systemImage),
+    systemImage,
+  }))
+  const candidates = parsedSystemImages
+    .filter((systemImage) => systemImage.abi === abi)
+    .filter((systemImage) => !platform || systemImage.platform === platform)
+    .filter((systemImage) => parseStableAndroidPlatform(systemImage.platform))
+    .filter((systemImage) =>
+      options.tag
+        ? systemImage.tagId === options.tag
+        : getSystemImageTagRank(systemImage.tagId) < PREFERRED_SYSTEM_IMAGE_TAGS.length,
+    )
+    .sort(
+      (left, right) =>
+        compareStableAndroidPlatforms(right.platform, left.platform) ||
+        getSystemImageTagRank(left.tagId) - getSystemImageTagRank(right.tagId) ||
+        left.systemImage.localeCompare(right.systemImage),
+    )
+
+  if (candidates[0]) {
+    return candidates[0].systemImage
+  }
+
+  const filters = [
+    `ABI "${abi}"`,
+    platform ? `platform "${platform}"` : undefined,
+    options.tag ? `tag "${options.tag}"` : undefined,
+  ].filter(Boolean)
+
+  throw new Error(`No latest stable system image package found for ${filters.join(', ')}.`)
+}
+
 export async function createOrUpdateAvd(
   options: CreateAvdOptions = {},
   dependencies: CreateAvdDependencies = {},
@@ -785,6 +892,30 @@ export function resolveAvailableAvdName(
   } while (existingNameSet.has(candidateName))
 
   return candidateName
+}
+
+export async function installLatestAvdPackages(
+  options: InstallAvdPackagesOptions = {},
+  dependencies: InstallAvdPackagesDependencies = {},
+): Promise<InstallAvdPackagesResult> {
+  const runCommandDependency = dependencies.runCommand ?? runCommand
+  const sdkRoot = options.sdkRoot ?? resolveAndroidSdkRoot()
+  const resolvedSystemImage =
+    options.systemImage ??
+    resolveLatestStableSystemImage(await listAvailableSystemImages(sdkRoot, runCommandDependency), options)
+  const { platform } = parseSystemImagePackage(resolvedSystemImage)
+  const installedPackages = [`platforms;${platform}`, resolvedSystemImage].sort((left, right) =>
+    left.localeCompare(right),
+  )
+  const { sdkmanager } = getToolPaths(sdkRoot)
+
+  await runCommandDependency([sdkmanager, '--install', ...installedPackages])
+
+  return {
+    installedPackages,
+    platform,
+    systemImage: resolvedSystemImage,
+  }
 }
 
 export async function listInstalledAvds(
@@ -954,6 +1085,17 @@ export async function listInstalledPlatforms(
   readDirectory: DirectoryReader = defaultReadDirectory,
 ): Promise<string[]> {
   return listDirectoryNames(join(sdkRoot, 'platforms'), readDirectory)
+}
+
+export async function listAvailableSystemImages(
+  sdkRoot: string,
+  runListCommand: CommandRunner = runCommand,
+): Promise<string[]> {
+  const { sdkmanager } = getToolPaths(sdkRoot)
+
+  return parseSdkmanagerPackagePaths(await runListCommand([sdkmanager, '--list']))
+    .filter((packagePath) => packagePath.startsWith('system-images;'))
+    .sort((left, right) => left.localeCompare(right))
 }
 
 export async function listRunningAvds(runAdbCommand: CommandRunner = runCommand): Promise<RunningAvd[]> {
